@@ -27,8 +27,8 @@ def verify_with_apify(emails_to_verify):
         st.error("Missing APIFY_TOKEN in Streamlit Secrets!")
         return {}
 
-    # Using the accurate gorang_m/email-verifier actor
-    url = f"https://api.apify.com/v2/acts/gorang_m~email-verifier/run-sync-get-dataset-items?token={APIFY_TOKEN}"
+    # SWAPPED ACTOR: Now using bounceverify/bounceverify-email-verifier ($0.89/1k)
+    url = f"https://api.apify.com/v2/acts/bounceverify~bounceverify-email-verifier/run-sync-get-dataset-items?token={APIFY_TOKEN}"
     payload = {"emails": emails_to_verify}
 
     try:
@@ -36,104 +36,89 @@ def verify_with_apify(emails_to_verify):
         if res.status_code in [200, 201]:
             items = res.json()
             results = {}
+            
             for item in items:
-                email = item.get("email")
-                result_status = item.get("result") 
-                reason_text = item.get("reason", "No reason provided")
+                email = item.get("email") or item.get("emailAddress")
+                if not email:
+                    continue
                 
-                if result_status == "valid":
+                # Check various status fields BounceVerify might output
+                raw_status = str(item.get("status", item.get("result", item.get("state", "")))).lower()
+                is_catch_all = item.get("is_catch_all", item.get("catchAll", False))
+                reason_text = item.get("reason", item.get("sub_status", "Server Response Logged"))
+                
+                if raw_status in ["valid", "good", "deliverable", "safe"]:
                     results[email] = ("VALID", reason_text)
-                elif result_status == "invalid":
+                elif raw_status in ["invalid", "bad", "undeliverable", "bounce", "disposable"]:
                     results[email] = ("INVALID", reason_text)
-                elif result_status == "catch_all":
-                    results[email] = ("UNCONFIRMED", "Catch-All Server Configured")
+                elif raw_status in ["catch_all", "catch-all", "risky", "unknown", "unconfirmed"] or is_catch_all:
+                    results[email] = ("UNCONFIRMED", "Catch-All / Unconfirmed Server Response")
                 else:
                     results[email] = ("UNCONFIRMED", reason_text)
+                    
             return results
+        else:
+            st.error(f"Apify Error: {res.text}")
+            return {}
     except Exception as e:
-        st.warning(f"Apify check failed: {e}")
-    
-    return {}
+        st.error(f"Request failed: {e}")
+        return {}
 
-uploaded_file = st.file_uploader("Drop your CSV file here", type=["csv"])
+uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
 if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-    st.success(f"Loaded {len(df)} rows.")
+    try:
+        df = pd.read_csv(uploaded_file)
+        
+        # Auto-detect email column
+        email_col = next((col for col in df.columns if 'email' in col.lower()), None)
+        if not email_col:
+            st.error("Could not find a column named 'email'. Please check your CSV.")
+            st.stop()
 
-    default_index = 0
-    for idx, col in enumerate(df.columns):
-        if 'email' in col.lower() or 'بريد' in col.lower():
-            default_index = idx
-            break
+        if st.button("🚀 Verify Emails"):
+            with st.spinner("Step 1: Running fast local DNS/MX checks..."):
+                df[['local_pass', 'Verification_Status', 'Reason']] = pd.DataFrame(
+                    df[email_col].apply(check_local_dns).tolist(), index=df.index
+                )
 
-    email_col = st.selectbox("Select Email Column", df.columns, index=default_index)
+            # Filter valid ones for Apify deeper check
+            emails_for_apify = df.loc[df['local_pass'] == True, email_col].dropna().unique().tolist()
 
-    if st.button("Start Verification", type="primary"):
-        status_text = st.empty()
-        status_text.text("Step 1/2: Pre-filtering invalid domains locally...")
+            if emails_for_apify:
+                with st.spinner(f"Step 2: Performing Deep SMTP/Catch-all check for {len(emails_for_apify)} emails using BounceVerify..."):
+                    apify_results = verify_with_apify(emails_for_apify)
 
-        emails = df[email_col].astype(str).str.strip().tolist()
-        statuses = []
-        reasons = []
-        apify_candidates = []
+                    for idx, row in df.iterrows():
+                        email = row[email_col]
+                        if row['local_pass'] and email in apify_results:
+                            status, reason = apify_results[email]
+                            df.at[idx, 'Verification_Status'] = status
+                            df.at[idx, 'Reason'] = reason
 
-        for email in emails:
-            has_mx, status, reason = check_local_dns(email)
-            if has_mx:
-                apify_candidates.append(email)
-                statuses.append("PENDING")
-                reasons.append("Pending Apify Check")
-            else:
-                statuses.append(status)
-                reasons.append(reason)
+            df.drop(columns=['local_pass'], inplace=True)
 
-        if apify_candidates:
-            status_text.text(f"Step 2/2: Verifying {len(apify_candidates)} active domains with Apify API...")
-            apify_results = verify_with_apify(apify_candidates)
+            st.success("Verification Complete!")
+            
+            # Show summary metrics
+            valid_count = len(df[df['Verification_Status'] == 'VALID'])
+            invalid_count = len(df[df['Verification_Status'] == 'INVALID'])
+            unconfirmed_count = len(df[df['Verification_Status'] == 'UNCONFIRMED'])
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("✅ Valid", valid_count)
+            col2.metric("❌ Invalid", invalid_count)
+            col3.metric("⚠️ Unconfirmed", unconfirmed_count)
 
-            for i, email in enumerate(emails):
-                if statuses[i] == "PENDING":
-                    res_status, res_reason = apify_results.get(email, ("UNCONFIRMED", "Unconfirmed Server Response"))
-                    statuses[i] = res_status
-                    reasons[i] = res_reason
+            st.dataframe(df)
 
-        # Output ONLY Email, Status, and Reason
-        clean_df = pd.DataFrame({
-            'Email': emails,
-            'Status': statuses,
-            'Reason': reasons
-        })
-
-        status_text.empty()
-        st.success("Verification Complete!")
-        st.dataframe(clean_df)
-
-        csv_buffer = io.BytesIO()
-        clean_df.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
-
-        st.download_button(
-            label="📥 Download Cleaned CSV",
-            data=csv_buffer,
-            file_name=f"verified_{uploaded_file.name}",
-            mime="text/csv"
-        )
-
-# ---------------------------------------------------------
-# Team Guidance & Caution Notice
-# ---------------------------------------------------------
-st.divider()
-st.subheader("💡 Important Notice & Team Guidance")
-
-st.markdown("""
-* **Focus on `VALID` and `INVALID` Data:**
-  * **VALID:** These addresses are active, deliverable, and safe to copy directly into your email outreach tools.
-  * **INVALID:** These addresses are confirmed dead or incorrectly formatted. Exclude them immediately to protect our sender domain reputation.
-
-* **How to Handle `UNCONFIRMED`:**
-  * These belong to "Catch-All" enterprise mail servers (e.g., corporate domains) that accept all incoming traffic at the perimeter. They are not guaranteed bad, but shouldn't be blasted in high volume without caution.
-
-* **A Big Step Closer, Not 100% Absolute:**
-  * Automated email verification is a high-precision filtering tool, but **no verification platform on the market is 100% infallible**. Mail server security policies, temporary greylisting, and internal firewalls can evolve dynamically over time. Use these results as a strong pre-send shield rather than a 100% guarantee.
-""")
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Cleaned CSV",
+                data=csv,
+                file_name="bounceverify_cleaned_emails.csv",
+                mime="text/csv",
+            )
+            
+    except Exception as e:
+        st.error(f"Error processing CSV: {e}")
