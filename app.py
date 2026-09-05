@@ -6,26 +6,23 @@ import streamlit as st
 
 st.set_page_config(page_title="Bulk Email Verifier", page_icon="📧", layout="centered")
 
-st.title("📧 Bulk Email Verifier")
-st.write("Upload your CSV file to clean your email list.")
+st.title("📧 Bulk Email Verifier for Urxprt team")
+st.write("Upload your CSV file to verify emails and get clean results.")
 
-# Pull API Token securely from Streamlit Secrets
 APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
 
 def check_local_dns(email):
-    """Fast local check for syntax and MX records."""
     if not isinstance(email, str) or not email.strip() or '@' not in email:
-        return False, "INVALID (Format)"
+        return False, "INVALID", "Invalid Email Format"
     
     domain = email.strip().split('@')[-1]
     try:
         dns.resolver.resolve(domain, 'MX')
-        return True, "VALID_MX"
+        return True, "PENDING", "Valid MX"
     except Exception:
-        return False, "INVALID (No MX Record)"
+        return False, "INVALID", "Domain or MX Record Missing"
 
 def verify_with_apify(emails_to_verify):
-    """Sends candidate emails to Apify for deep SMTP verification."""
     if not APIFY_TOKEN:
         st.error("Missing APIFY_TOKEN in Streamlit Secrets!")
         return {}
@@ -37,7 +34,6 @@ def verify_with_apify(emails_to_verify):
         res = requests.post(url, json=payload, timeout=120)
         if res.status_code in [200, 201]:
             items = res.json()
-            # Map email -> verification result
             results = {}
             for item in items:
                 email = item.get("email")
@@ -45,14 +41,14 @@ def verify_with_apify(emails_to_verify):
                 is_catch_all = item.get("is_catch_all", False)
                 
                 if is_valid:
-                    results[email] = "VALID"
+                    results[email] = ("VALID", "Mailbox Deliverable")
                 elif is_catch_all:
-                    results[email] = "RISKY (Catch-All)"
+                    results[email] = ("RISKY", "Catch-All Server Configured")
                 else:
-                    results[email] = "INVALID"
+                    results[email] = ("INVALID", "Mailbox Undeliverable")
             return results
     except Exception as e:
-        st.warning(f"Apify call failed: {e}")
+        st.warning(f"Apify check failed: {e}")
     
     return {}
 
@@ -62,48 +58,56 @@ if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
     st.success(f"Loaded {len(df)} rows.")
 
-    email_col = st.selectbox("Select Email Column", df.columns, index=0)
+    default_index = 0
+    for idx, col in enumerate(df.columns):
+        if 'email' in col.lower() or 'بريد' in col.lower():
+            default_index = idx
+            break
+
+    email_col = st.selectbox("Select Email Column", df.columns, index=default_index)
 
     if st.button("Start Verification", type="primary"):
         status_text = st.empty()
         status_text.text("Step 1/2: Filtering invalid domains locally...")
 
         emails = df[email_col].astype(str).str.strip().tolist()
-        final_statuses = []
+        statuses = []
+        reasons = []
         apify_candidates = []
 
-        # Local DNS pre-check
         for email in emails:
-            has_mx, reason = check_local_dns(email)
+            has_mx, status, reason = check_local_dns(email)
             if has_mx:
                 apify_candidates.append(email)
-                final_statuses.append("PENDING")
+                statuses.append("PENDING")
+                reasons.append("Pending Apify Check")
             else:
-                final_statuses.append(reason)
+                statuses.append(status)
+                reasons.append(reason)
 
-        # Apify deep check for remaining emails
         if apify_candidates:
             status_text.text(f"Step 2/2: Verifying {len(apify_candidates)} active domains with Apify...")
             apify_results = verify_with_apify(apify_candidates)
 
-            # Merge results
             for i, email in enumerate(emails):
-                if final_statuses[i] == "PENDING":
-                    final_statuses[i] = apify_results.get(email, "RISKY (Unconfirmed)")
+                if statuses[i] == "PENDING":
+                    res_status, res_reason = apify_results.get(email, ("RISKY", "Unconfirmed Server Response"))
+                    statuses[i] = res_status
+                    reasons[i] = res_reason
 
-        # Clean existing status columns
-        for col in ['Validity', 'Verification_Status', 'Verification_Details', 'Status']:
-            if col in df.columns:
-                df.drop(columns=[col], inplace=True)
-
-        df['Status'] = final_statuses
+        # Output ONLY Email, Status, and Reason
+        clean_df = pd.DataFrame({
+            'Email': emails,
+            'Status': statuses,
+            'Reason': reasons
+        })
 
         status_text.empty()
         st.success("Verification Complete!")
-        st.dataframe(df)
+        st.dataframe(clean_df)
 
         csv_buffer = io.BytesIO()
-        df.to_csv(csv_buffer, index=False)
+        clean_df.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
 
         st.download_button(
