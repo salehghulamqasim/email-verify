@@ -1,53 +1,60 @@
 import io
-import socket
-import smtplib
+import requests
 import pandas as pd
 import dns.resolver
-import dns.exception
 import streamlit as st
-from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(page_title="Bulk Email Verifier", page_icon="📧", layout="centered")
 
 st.title("📧 Bulk Email Verifier")
-st.write("Upload your CSV file to clean your email list before sending cold outreach.")
+st.write("Upload your CSV file to clean your email list.")
 
-TIMEOUT = 5
-MAX_WORKERS = 10
+# Pull API Token securely from Streamlit Secrets
+APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
 
-def check_single_email(email):
+def check_local_dns(email):
+    """Fast local check for syntax and MX records."""
     if not isinstance(email, str) or not email.strip() or '@' not in email:
-        return "INVALID_FORMAT", "Missing '@' or empty address"
+        return False, "INVALID (Format)"
+    
+    domain = email.strip().split('@')[-1]
+    try:
+        dns.resolver.resolve(domain, 'MX')
+        return True, "VALID_MX"
+    except Exception:
+        return False, "INVALID (No MX Record)"
 
-    email = email.strip()
-    domain = email.split('@')[-1]
+def verify_with_apify(emails_to_verify):
+    """Sends candidate emails to Apify for deep SMTP verification."""
+    if not APIFY_TOKEN:
+        st.error("Missing APIFY_TOKEN in Streamlit Secrets!")
+        return {}
+
+    url = f"https://api.apify.com/v2/acts/reacher~email-verifier/run-sync-get-dataset-items?token={APIFY_TOKEN}"
+    payload = {"emails": emails_to_verify}
 
     try:
-        mx_records = dns.resolver.resolve(domain, 'MX')
-        primary_mx = str(sorted(mx_records, key=lambda r: r.preference)[0].exchange).rstrip('.')
-    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
-        return "INVALID", "Domain does not exist or has no active MX records"
+        res = requests.post(url, json=payload, timeout=120)
+        if res.status_code in [200, 201]:
+            items = res.json()
+            # Map email -> verification result
+            results = {}
+            for item in items:
+                email = item.get("email")
+                is_valid = item.get("is_valid")
+                is_catch_all = item.get("is_catch_all", False)
+                
+                if is_valid:
+                    results[email] = "VALID"
+                elif is_catch_all:
+                    results[email] = "RISKY (Catch-All)"
+                else:
+                    results[email] = "INVALID"
+            return results
     except Exception as e:
-        return "DNS_ERROR", str(e)
-
-    try:
-        server = smtplib.SMTP(timeout=TIMEOUT)
-        server.connect(primary_mx, 25)
-        server.helo(socket.gethostname())
-        server.mail("verify@example.com")
-        code, response = server.rcpt(email)
-        server.quit()
-
-        if code == 250:
-            return "VALID", "250 OK"
-        elif code in [550, 551, 552, 553, 554]:
-            return "INVALID", f"{code} Mailbox does not exist"
-        else:
-            return "CATCH_ALL/RISKY", f"Code {code}"
-    except socket.timeout:
-        return "TIMEOUT", "SMTP Connection timed out"
-    except Exception as e:
-        return "ERROR", str(e)
+        st.warning(f"Apify call failed: {e}")
+    
+    return {}
 
 uploaded_file = st.file_uploader("Drop your CSV file here", type=["csv"])
 
@@ -58,22 +65,40 @@ if uploaded_file is not None:
     email_col = st.selectbox("Select Email Column", df.columns, index=0)
 
     if st.button("Start Verification", type="primary"):
-        progress_bar = st.progress(0)
         status_text = st.empty()
+        status_text.text("Step 1/2: Filtering invalid domains locally...")
 
-        emails = df[email_col].astype(str).tolist()
-        results = []
+        emails = df[email_col].astype(str).str.strip().tolist()
+        final_statuses = []
+        apify_candidates = []
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            for i, res in enumerate(executor.map(check_single_email, emails)):
-                results.append(res)
-                progress = (i + 1) / len(emails)
-                progress_bar.progress(progress)
-                status_text.text(f"Verifying {i+1}/{len(emails)}: {emails[i]}")
+        # Local DNS pre-check
+        for email in emails:
+            has_mx, reason = check_local_dns(email)
+            if has_mx:
+                apify_candidates.append(email)
+                final_statuses.append("PENDING")
+            else:
+                final_statuses.append(reason)
 
-        df['Verification_Status'] = [r[0] for r in results]
-        df['Verification_Details'] = [r[1] for r in results]
+        # Apify deep check for remaining emails
+        if apify_candidates:
+            status_text.text(f"Step 2/2: Verifying {len(apify_candidates)} active domains with Apify...")
+            apify_results = verify_with_apify(apify_candidates)
 
+            # Merge results
+            for i, email in enumerate(emails):
+                if final_statuses[i] == "PENDING":
+                    final_statuses[i] = apify_results.get(email, "RISKY (Unconfirmed)")
+
+        # Clean existing status columns
+        for col in ['Validity', 'Verification_Status', 'Verification_Details', 'Status']:
+            if col in df.columns:
+                df.drop(columns=[col], inplace=True)
+
+        df['Status'] = final_statuses
+
+        status_text.empty()
         st.success("Verification Complete!")
         st.dataframe(df)
 
