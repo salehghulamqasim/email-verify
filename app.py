@@ -6,7 +6,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Bulk Email Verifier", page_icon="📧", layout="centered")
 
-st.title("📧 Bulk Email Verifier for Urxprt team")
+st.title("📧 Bulk Email Verifier - URXPRT team")
 st.write("Upload your CSV file to verify emails and get clean results.")
 
 APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
@@ -41,9 +41,9 @@ def verify_with_apify(emails_to_verify):
                 is_catch_all = item.get("is_catch_all", False)
                 
                 if is_valid:
-                    results[email] = ("VALID", "Mailbox Deliverable")
+                    results[email] = ("CONFIRMED", "Mailbox Deliverable")
                 elif is_catch_all:
-                    results[email] = ("RISKY", "Catch-All Server Configured")
+                    results[email] = ("UNCONFIRMED", "Catch-All Server Configured")
                 else:
                     results[email] = ("INVALID", "Mailbox Undeliverable")
             return results
@@ -68,7 +68,7 @@ if uploaded_file is not None:
 
     if st.button("Start Verification", type="primary"):
         status_text = st.empty()
-        status_text.text("Step 1/2: Filtering invalid domains locally...")
+        status_text.text("Step 1/2: Pre-filtering invalid domains locally...")
 
         emails = df[email_col].astype(str).str.strip().tolist()
         statuses = []
@@ -91,7 +91,7 @@ if uploaded_file is not None:
 
             for i, email in enumerate(emails):
                 if statuses[i] == "PENDING":
-                    res_status, res_reason = apify_results.get(email, ("RISKY", "Unconfirmed Server Response"))
+                    res_status, res_reason = apify_results.get(email, ("UNCONFIRMED", "Unconfirmed Server Response"))
                     statuses[i] = res_status
                     reasons[i] = res_reason
 
@@ -116,3 +116,21 @@ if uploaded_file is not None:
             file_name=f"verified_{uploaded_file.name}",
             mime="text/csv"
         )
+
+# ---------------------------------------------------------
+# Team Guidance & Caution Notice at the bottom of the page
+# ---------------------------------------------------------
+st.divider()
+st.subheader("💡 Important Notice & Team Guidance")
+
+st.markdown("""
+* **Focus on `CONFIRMED` and `INVALID` Data:**
+  * **CONFIRMED:** These addresses are active, deliverable, and safe to copy directly into your email outreach tools.
+  * **INVALID:** These addresses are confirmed dead or incorrectly formatted. Exclude them immediately to protect our sender domain reputation.
+
+* **How to Handle `UNCONFIRMED`:**
+  * Do not remove uncofirmed emails. do add them in file but with unconfirmed label.
+  
+* **A Big Step Closer, Not 100% Absolute:**
+  * Automated email verification is a high-precision filtering tool, but **no verification platform on the market is 100% infallible**. Mail server security policies, temporary greylisting, and internal firewalls can evolve dynamically over time. Use these results as a strong pre-send shield rather than a 100% guarantee.
+""")
