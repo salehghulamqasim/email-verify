@@ -6,7 +6,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Bulk Email Verifier", page_icon="📧", layout="centered")
 
-st.title("📧 Bulk Email Verifier - URXPRT team")
+st.title("📧 Bulk Email Verifier")
 st.write("Upload your CSV file to verify emails and get clean results.")
 
 APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
@@ -27,25 +27,28 @@ def verify_with_apify(emails_to_verify):
         st.error("Missing APIFY_TOKEN in Streamlit Secrets!")
         return {}
 
-    url = f"https://api.apify.com/v2/acts/reacher~email-verifier/run-sync-get-dataset-items?token={APIFY_TOKEN}"
+    # Using the accurate gorang_m/email-verifier actor
+    url = f"https://api.apify.com/v2/acts/gorang_m~email-verifier/run-sync-get-dataset-items?token={APIFY_TOKEN}"
     payload = {"emails": emails_to_verify}
 
     try:
-        res = requests.post(url, json=payload, timeout=120)
+        res = requests.post(url, json=payload, timeout=300)
         if res.status_code in [200, 201]:
             items = res.json()
             results = {}
             for item in items:
                 email = item.get("email")
-                is_valid = item.get("is_valid")
-                is_catch_all = item.get("is_catch_all", False)
+                result_status = item.get("result") 
+                reason_text = item.get("reason", "No reason provided")
                 
-                if is_valid:
-                    results[email] = ("CONFIRMED", "Mailbox Deliverable")
-                elif is_catch_all:
+                if result_status == "valid":
+                    results[email] = ("VALID", reason_text)
+                elif result_status == "invalid":
+                    results[email] = ("INVALID", reason_text)
+                elif result_status == "catch_all":
                     results[email] = ("UNCONFIRMED", "Catch-All Server Configured")
                 else:
-                    results[email] = ("INVALID", "Mailbox Undeliverable")
+                    results[email] = ("UNCONFIRMED", reason_text)
             return results
     except Exception as e:
         st.warning(f"Apify check failed: {e}")
@@ -86,7 +89,7 @@ if uploaded_file is not None:
                 reasons.append(reason)
 
         if apify_candidates:
-            status_text.text(f"Step 2/2: Verifying {len(apify_candidates)} active domains with Apify...")
+            status_text.text(f"Step 2/2: Verifying {len(apify_candidates)} active domains with Apify API...")
             apify_results = verify_with_apify(apify_candidates)
 
             for i, email in enumerate(emails):
@@ -118,19 +121,19 @@ if uploaded_file is not None:
         )
 
 # ---------------------------------------------------------
-# Team Guidance & Caution Notice at the bottom of the page
+# Team Guidance & Caution Notice
 # ---------------------------------------------------------
 st.divider()
 st.subheader("💡 Important Notice & Team Guidance")
 
 st.markdown("""
-* **Focus on `CONFIRMED` and `INVALID` Data:**
-  * **CONFIRMED:** These addresses are active, deliverable, and safe to copy directly into your email outreach tools.
+* **Focus on `VALID` and `INVALID` Data:**
+  * **VALID:** These addresses are active, deliverable, and safe to copy directly into your email outreach tools.
   * **INVALID:** These addresses are confirmed dead or incorrectly formatted. Exclude them immediately to protect our sender domain reputation.
 
 * **How to Handle `UNCONFIRMED`:**
-  * Do not remove uncofirmed emails. do add them in file but with unconfirmed label.
-  
+  * These belong to "Catch-All" enterprise mail servers (e.g., corporate domains) that accept all incoming traffic at the perimeter. They are not guaranteed bad, but shouldn't be blasted in high volume without caution.
+
 * **A Big Step Closer, Not 100% Absolute:**
   * Automated email verification is a high-precision filtering tool, but **no verification platform on the market is 100% infallible**. Mail server security policies, temporary greylisting, and internal firewalls can evolve dynamically over time. Use these results as a strong pre-send shield rather than a 100% guarantee.
 """)
