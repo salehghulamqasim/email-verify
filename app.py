@@ -6,58 +6,31 @@ import streamlit as st
 
 st.set_page_config(page_title="Bulk Email Verifier", page_icon="📧", layout="centered")
 
+# --- GLOBAL RESET BUTTON ---
+with st.sidebar:
+    st.header("Controls")
+    if st.button("🔄 Reset App"):
+        st.session_state.clear()
+        st.rerun()
+    st.caption("Click to clear all results and start over if the app gets stuck.")
+
 st.title("📧 Bulk Email Verifier")
 st.write("Upload your CSV file to verify emails and get clean results.")
 
-# ------------------------------------------------------------------
-# Instructions — collapsed by default so it doesn't dominate the page
-# ------------------------------------------------------------------
-with st.expander("ℹ️ How to use this tool"):
-    st.markdown(
-        "1. Upload your **.csv** file (no Excel, PDF, or other formats — they won't work).\n"
-        "2. Click **Verify Emails**.\n"
-        "3. Download the result and **paste it into your own tracking sheet.** "
-        "This tool doesn't save anything — once you close the tab, it's gone."
-    )
-st.caption("This tool only adds new columns (`Verification_Status`, `Reason`) — it never edits, deletes, or reorders your existing data.")
-
 APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
 
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
-
-st.markdown(
-    """
-    <style>
-        .reset-link button {
-            background: transparent !important;
-            border: none !important;
-            color: #9a9ea6 !important;
-            font-size: 0.82rem !important;
-            padding: 0 !important;
-            box-shadow: none !important;
-        }
-        .reset-link button:hover { color: #c7cad0 !important; text-decoration: underline; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-def check_local_dns(email_clean):
-    if not isinstance(email_clean, str) or not email_clean.strip() or '@' not in email_clean:
+def check_local_dns(email):
+    if not isinstance(email, str) or not email.strip() or '@' not in email:
         return False, "INVALID", "Invalid Email Format"
-
-    domain = email_clean.split('@')[-1]
+    
+    domain = email.strip().split('@')[-1]
     try:
         dns.resolver.resolve(domain, 'MX')
         return True, "PENDING", "Valid MX"
     except Exception:
         return False, "INVALID", "Domain or MX Record Missing"
 
-
 def verify_with_apify(emails_to_verify):
-    """emails_to_verify should already be cleaned (stripped/lowercased)."""
     if not APIFY_TOKEN:
         st.error("Missing APIFY_TOKEN in Streamlit Secrets!")
         return {}
@@ -70,27 +43,25 @@ def verify_with_apify(emails_to_verify):
         if res.status_code in [200, 201]:
             items = res.json()
             results = {}
-
+            
             for item in items:
                 email = item.get("email") or item.get("emailAddress")
                 if not email:
                     continue
-                # Normalize the key so it matches however we stored our own lookup
-                email_key = str(email).strip().lower()
-
+                
                 raw_status = str(item.get("status", item.get("result", item.get("state", "")))).lower()
                 is_catch_all = item.get("is_catch_all", item.get("catchAll", False))
                 reason_text = item.get("reason", item.get("sub_status", "Server Response Logged"))
-
+                
                 if raw_status in ["valid", "good", "deliverable", "safe"]:
-                    results[email_key] = ("VALID", reason_text)
+                    results[email] = ("VALID", reason_text)
                 elif raw_status in ["invalid", "bad", "undeliverable", "bounce", "disposable"]:
-                    results[email_key] = ("INVALID", reason_text)
+                    results[email] = ("INVALID", reason_text)
                 elif raw_status in ["catch_all", "catch-all", "risky", "unknown", "unconfirmed"] or is_catch_all:
-                    results[email_key] = ("UNCONFIRMED", "Catch-All / Unconfirmed Server Response")
+                    results[email] = ("UNCONFIRMED", "Catch-All / Unconfirmed Server Response")
                 else:
-                    results[email_key] = ("UNCONFIRMED", reason_text)
-
+                    results[email] = ("UNCONFIRMED", reason_text)
+                    
             return results
         else:
             st.error(f"Apify Error: {res.text}")
@@ -99,131 +70,74 @@ def verify_with_apify(emails_to_verify):
         st.error(f"Request failed: {e}")
         return {}
 
-
-uploaded_file = st.file_uploader(
-    "Upload CSV File",
-    type=["csv"],
-    key=f"uploader_{st.session_state.uploader_key}",
-)
-
-st.markdown('<div class="reset-link">', unsafe_allow_html=True)
-if st.button("Upload stuck? Reset"):
-    st.session_state.uploader_key += 1
-    st.rerun()
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.divider()
+uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
 if uploaded_file is not None:
-    # Defensive check: type=["csv"] only filters the file picker dialog,
-    # a user can still drag-and-drop a renamed file. Double check the extension.
-    if not uploaded_file.name.lower().endswith(".csv"):
-        st.error("That file doesn't look like a CSV. Please upload a .csv file only.")
-        st.stop()
-
     try:
+        # Read CSV exactly as is
         df = pd.read_csv(uploaded_file)
-    except Exception as e:
-        st.error(
-            f"Couldn't read this as a CSV file (Error: {e}). "
-            "Please make sure it's a plain .csv, not renamed from Excel/PDF/etc."
-        )
-        st.stop()
+        
+        email_col = next((col for col in df.columns if 'email' in col.lower()), None)
+        if not email_col:
+            st.error("Could not find a column named 'email'. Please check your CSV.")
+            st.stop()
 
-    if df.empty:
-        st.error("This CSV appears to be empty.")
-        st.stop()
+        # Initialize session state for storing results
+        if 'verified_df' not in st.session_state:
+            st.session_state.verified_df = None
 
-    # Auto-detect email column
-    email_col = next((col for col in df.columns if 'email' in col.lower()), None)
-    if not email_col:
-        st.error("Could not find a column with 'email' in its name. Please check your CSV.")
-        st.stop()
+        if st.button("🚀 Verify Emails"):
+            with st.spinner("Step 1: Running fast local DNS/MX checks..."):
+                # Clean whitespace only for the check, without altering original CSV data
+                clean_emails = df[email_col].astype(str).str.strip()
+                
+                df[['local_pass', 'Verification_Status', 'Reason']] = pd.DataFrame(
+                    clean_emails.apply(check_local_dns).tolist(), index=df.index
+                )
 
-    st.success(f"Loaded **{len(df)}** rows. Email column detected: **{email_col}**")
+            # Filter valid ones for Apify deeper check using the cleaned emails
+            emails_for_apify = clean_emails[df['local_pass'] == True].dropna().unique().tolist()
 
-    # Safety guard: never silently overwrite columns that already exist in the
-    # uploaded file (e.g. if someone re-uploads a file that was already run
-    # through this tool before, or already has a column with these names).
-    NEW_COLUMNS = ['Verification_Status', 'Reason']
-    existing_clash = [c for c in NEW_COLUMNS if c in df.columns]
-    if existing_clash:
-        st.warning(
-            f"Your file already has a column named {', '.join(existing_clash)}. "
-            "To avoid overwriting your existing data, this run will add new columns named "
-            f"{', '.join(c + '_new' for c in existing_clash)} instead."
-        )
-        NEW_COLUMNS = [c + '_new' if c in existing_clash else c for c in NEW_COLUMNS]
-    status_col, reason_col = NEW_COLUMNS
+            if emails_for_apify:
+                with st.spinner(f"Step 2: Performing Deep SMTP/Catch-all check for {len(emails_for_apify)} emails using BounceVerify..."):
+                    apify_results = verify_with_apify(emails_for_apify)
 
-    # Keep an untouched copy of exactly what was uploaded, for peace of mind —
-    # everything below only ever ADDS columns to a copy, never edits df in place
-    # in a way that changes your original values.
-    original_columns = list(df.columns)
+                    for idx, row in df.iterrows():
+                        email = str(row[email_col]).strip()
+                        if row['local_pass'] and email in apify_results:
+                            status, reason = apify_results[email]
+                            df.at[idx, 'Verification_Status'] = status
+                            df.at[idx, 'Reason'] = reason
 
-    if st.button("🚀 Verify Emails"):
-        # Clean, normalized version used for DNS check, Apify lookup, and matching results back.
-        # This is a separate working copy — the ORIGINAL email column is never modified.
-        email_clean_series = df[email_col].astype(str).str.strip().str.lower()
+            # Drop the temporary processing column so it doesn't appear in the final CSV
+            df.drop(columns=['local_pass'], inplace=True)
 
-        with st.spinner("Step 1: Running fast local DNS/MX checks..."):
-            df[['local_pass', status_col, reason_col]] = pd.DataFrame(
-                email_clean_series.apply(check_local_dns).tolist(), index=df.index
+            # Save the fully intact dataframe to session state
+            st.session_state.verified_df = df
+            st.success("Verification Complete!")
+            
+        # Display metrics and download button
+        if st.session_state.verified_df is not None:
+            final_df = st.session_state.verified_df
+            
+            valid_count = len(final_df[final_df['Verification_Status'] == 'VALID'])
+            invalid_count = len(final_df[final_df['Verification_Status'] == 'INVALID'])
+            unconfirmed_count = len(final_df[final_df['Verification_Status'] == 'UNCONFIRMED'])
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("✅ Valid", valid_count)
+            col2.metric("❌ Invalid", invalid_count)
+            col3.metric("⚠️ Unconfirmed", unconfirmed_count)
+
+            st.dataframe(final_df)
+
+            csv = final_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Verified CSV",
+                data=csv,
+                file_name="bounceverify_results.csv",
+                mime="text/csv",
             )
-
-        # Filter valid ones for Apify deeper check (use cleaned emails)
-        df['_email_clean'] = email_clean_series
-        emails_for_apify = df.loc[df['local_pass'] == True, '_email_clean'].dropna().unique().tolist()
-
-        if emails_for_apify:
-            with st.spinner(f"Step 2: Performing Deep SMTP/Catch-all check for {len(emails_for_apify)} emails using BounceVerify..."):
-                apify_results = verify_with_apify(emails_for_apify)
-
-                for idx, row in df.iterrows():
-                    if not row['local_pass']:
-                        continue
-                    email_key = row['_email_clean']
-                    if email_key in apify_results:
-                        status, reason = apify_results[email_key]
-                        df.at[idx, status_col] = status
-                        df.at[idx, reason_col] = reason
-                    else:
-                        # Previously this silently stayed as "PENDING" and vanished from the summary.
-                        # Now it's explicitly flagged so nothing gets lost.
-                        df.at[idx, status_col] = 'UNCONFIRMED'
-                        df.at[idx, reason_col] = 'No response from verification service'
-
-        df.drop(columns=['local_pass', '_email_clean'], inplace=True)
-
-        # Sanity check: confirm every original column and every original value
-        # is still present, unchanged, before we show results. This is the
-        # actual enforcement behind the "we never touch your data" promise.
-        assert all(c in df.columns for c in original_columns), "A required original column went missing — stopping to avoid showing corrupted data."
-
-        st.divider()
-        st.success("Verification Complete! Your original columns are untouched — only new columns were added.")
-
-        # Show summary metrics
-        valid_count = len(df[df[status_col] == 'VALID'])
-        invalid_count = len(df[df[status_col] == 'INVALID'])
-        unconfirmed_count = len(df[df[status_col] == 'UNCONFIRMED'])
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("✅ Valid", valid_count)
-        col2.metric("❌ Invalid", invalid_count)
-        col3.metric("⚠️ Unconfirmed", unconfirmed_count)
-
-        if valid_count + invalid_count + unconfirmed_count != len(df):
-            st.warning("⚠️ Some rows didn't get a final status — please double check the table below before using these results.")
-
-        st.dataframe(df, use_container_width=True)
-
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Cleaned CSV",
-            data=csv,
-            file_name="bounceverify_cleaned_emails.csv",
-            mime="text/csv",
-        )
-
-        st.warning("📋 Reminder: please update your own tracking sheet with these results now — this app doesn't save anything.")
+            
+    except Exception as e:
+        st.error(f"Error processing CSV: {e}")
