@@ -15,10 +15,10 @@ APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
 ACTOR_ID = "bounceverify~bounceverify-email-verifier"
 
 # ---------------- Settings (fixed, tuned for reliability at 1k+ emails) ----------------
-BATCH_SIZE = 100           # emails per Apify run
+BATCH_SIZE = 50            # emails per Apify run — smaller = faster feedback, less risk per batch
 MAX_RETRIES = 3            # retries per batch before giving up
 POLL_INTERVAL = 5          # seconds between run-status checks
-MAX_WAIT_PER_BATCH = 1200  # max seconds to wait for one batch (20 min)
+MAX_WAIT_PER_BATCH = 600   # max seconds to wait for one batch (10 min)
 
 # ---------------- Local DNS/MX check (cached per domain) ----------------
 @lru_cache(maxsize=8192)
@@ -47,14 +47,19 @@ def _start_run(batch):
     return res.json()["data"]["id"]
 
 
-def _wait_for_run(run_id):
+def _wait_for_run(run_id, progress_text, label):
+    """Poll the run until done. Updates the UI on every tick so the browser
+    connection stays alive and the user can see it's still working."""
     url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
     waited = 0
     while waited < MAX_WAIT_PER_BATCH:
         res = requests.get(url, timeout=30)
         res.raise_for_status()
         data = res.json()["data"]
-        if data["status"] in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
+        status = data["status"]
+        mins, secs = divmod(waited, 60)
+        progress_text.text(f"{label} — status: {status}, elapsed {mins}m{secs:02d}s")
+        if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
             return data
         time.sleep(POLL_INTERVAL)
         waited += POLL_INTERVAL
@@ -107,11 +112,12 @@ def _run_one_batch(batch, batch_num, total_batches, done_count, total, progress_
             )
             run_id = _start_run(batch)
 
-            progress_text.text(
+            label = (
                 f"Batch {batch_num}/{total_batches}: verifying {len(batch)} emails "
-                f"({done_count}/{total})..."
+                f"({done_count}/{total})"
             )
-            run_data = _wait_for_run(run_id)
+            progress_text.text(f"{label}...")
+            run_data = _wait_for_run(run_id, progress_text, label)
 
             if run_data["status"] != "SUCCEEDED":
                 raise RuntimeError(f"run ended with status {run_data['status']}")
