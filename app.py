@@ -1,4 +1,3 @@
-Working version of email verification streamline but has bug in upload button nsoemteism won’t run 
 import io
 import requests
 import pandas as pd
