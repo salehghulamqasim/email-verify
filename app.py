@@ -6,67 +6,38 @@ import streamlit as st
 
 st.set_page_config(page_title="Bulk Email Verifier", page_icon="📧", layout="centered")
 
+st.title("📧 Bulk Email Verifier")
+st.write("Upload your CSV file to verify emails and get clean results.")
+
 # ------------------------------------------------------------------
-# Minimal styling — quiet, tidy, no visual noise
+# Instructions banner
 # ------------------------------------------------------------------
-st.markdown(
-    """
-    <style>
-        .block-container { padding-top: 3.5rem; padding-bottom: 3rem; max-width: 640px; }
-        h1 { font-size: 1.6rem !important; font-weight: 600 !important; margin-bottom: 0.15rem !important; }
-        .subtitle { color: #8a8f98; font-size: 0.95rem; margin-bottom: 2rem; }
-
-        [data-testid="stFileUploaderDropzone"] {
-            border-radius: 10px;
-            border: 1.5px dashed #d8dadf;
-            background-color: #fafafa;
-        }
-        [data-testid="stFileUploaderDropzone"]:hover { border-color: #b8bcc4; }
-
-        div[data-testid="stButton"] button[kind="primary"] {
-            border-radius: 8px;
-            padding: 0.55rem 1.4rem;
-            font-weight: 500;
-            border: none;
-        }
-
-        /* quiet, text-style reset link instead of a competing button */
-        .reset-link button {
-            background: transparent !important;
-            border: none !important;
-            color: #9a9ea6 !important;
-            font-size: 0.82rem !important;
-            padding: 0 !important;
-            box-shadow: none !important;
-        }
-        .reset-link button:hover { color: #6b6f76 !important; text-decoration: underline; }
-
-        [data-testid="stMetric"] {
-            background-color: #fafafa;
-            border-radius: 10px;
-            padding: 0.9rem 0.6rem;
-            border: 1px solid #eee;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
+st.info(
+    "**How to use this tool:**\n"
+    "1. Upload your **.csv** file (no Excel, PDF, or other formats — they won't work).\n"
+    "2. Click **Verify Emails**.\n"
+    "3. Download the result and **paste it into your own tracking sheet.** "
+    "This tool doesn't save anything — once you close the tab, it's gone.\n\n"
+    "✅ **Your data is safe:** this tool only *adds* new columns (`Verification_Status`, `Reason`) "
+    "to your file. It never edits, deletes, or reorders anything you already had."
 )
-
-st.markdown("# 📧 Bulk Email Verifier")
-st.markdown('<p class="subtitle">Upload a CSV, get each email checked, download the results.</p>', unsafe_allow_html=True)
-
-with st.expander("How this works / rules"):
-    st.markdown(
-        "- Only **.csv** files work — no Excel, PDF, or other formats.\n"
-        "- Your original columns are never changed. This only **adds** two new columns "
-        "(`Verification_Status`, `Reason`) — nothing existing is edited, deleted, or reordered.\n"
-        "- Nothing is saved on this site. After downloading, **paste the results into your own tracking sheet.**"
-    )
 
 APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
 
+# ------------------------------------------------------------------
+# Reset button — click this any time the uploader seems stuck.
+# ------------------------------------------------------------------
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
+
+reset_col, _ = st.columns([1, 3])
+with reset_col:
+    if st.button("🔄 Reset upload"):
+        st.session_state.uploader_key += 1
+        st.rerun()
+st.caption("Upload button stuck or not responding? Click **Reset upload** above, then try again.")
+
+st.divider()
 
 
 def check_local_dns(email_clean):
@@ -126,18 +97,10 @@ def verify_with_apify(emails_to_verify):
 
 
 uploaded_file = st.file_uploader(
-    "Upload CSV file",
+    "Upload CSV File",
     type=["csv"],
     key=f"uploader_{st.session_state.uploader_key}",
-    label_visibility="collapsed",
 )
-
-with st.container():
-    st.markdown('<div class="reset-link">', unsafe_allow_html=True)
-    if st.button("Upload not working? Reset", key="reset_btn"):
-        st.session_state.uploader_key += 1
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 if uploaded_file is not None:
     # Defensive check: type=["csv"] only filters the file picker dialog,
@@ -165,6 +128,8 @@ if uploaded_file is not None:
         st.error("Could not find a column with 'email' in its name. Please check your CSV.")
         st.stop()
 
+    st.success(f"Loaded **{len(df)}** rows. Email column detected: **{email_col}**")
+
     # Safety guard: never silently overwrite columns that already exist in the
     # uploaded file (e.g. if someone re-uploads a file that was already run
     # through this tool before, or already has a column with these names).
@@ -184,13 +149,12 @@ if uploaded_file is not None:
     # in a way that changes your original values.
     original_columns = list(df.columns)
 
-    st.write("")
-    if st.button("Verify Emails", type="primary"):
+    if st.button("🚀 Verify Emails"):
         # Clean, normalized version used for DNS check, Apify lookup, and matching results back.
         # This is a separate working copy — the ORIGINAL email column is never modified.
         email_clean_series = df[email_col].astype(str).str.strip().str.lower()
 
-        with st.spinner("Checking domains..."):
+        with st.spinner("Step 1: Running fast local DNS/MX checks..."):
             df[['local_pass', status_col, reason_col]] = pd.DataFrame(
                 email_clean_series.apply(check_local_dns).tolist(), index=df.index
             )
@@ -200,7 +164,7 @@ if uploaded_file is not None:
         emails_for_apify = df.loc[df['local_pass'] == True, '_email_clean'].dropna().unique().tolist()
 
         if emails_for_apify:
-            with st.spinner(f"Verifying {len(emails_for_apify)} email(s)..."):
+            with st.spinner(f"Step 2: Performing Deep SMTP/Catch-all check for {len(emails_for_apify)} emails using BounceVerify..."):
                 apify_results = verify_with_apify(emails_for_apify)
 
                 for idx, row in df.iterrows():
@@ -224,8 +188,8 @@ if uploaded_file is not None:
         # actual enforcement behind the "we never touch your data" promise.
         assert all(c in df.columns for c in original_columns), "A required original column went missing — stopping to avoid showing corrupted data."
 
-        st.markdown("")
-        st.markdown("**Done.** Original columns untouched — `Verification_Status` and `Reason` were added.")
+        st.divider()
+        st.success("Verification Complete! Your original columns are untouched — only new columns were added.")
 
         # Show summary metrics
         valid_count = len(df[df[status_col] == 'VALID'])
@@ -233,23 +197,21 @@ if uploaded_file is not None:
         unconfirmed_count = len(df[df[status_col] == 'UNCONFIRMED'])
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("Valid", valid_count)
-        col2.metric("Invalid", invalid_count)
-        col3.metric("Unconfirmed", unconfirmed_count)
+        col1.metric("✅ Valid", valid_count)
+        col2.metric("❌ Invalid", invalid_count)
+        col3.metric("⚠️ Unconfirmed", unconfirmed_count)
 
         if valid_count + invalid_count + unconfirmed_count != len(df):
-            st.warning("Some rows didn't get a final status — please check the table below before using these results.")
+            st.warning("⚠️ Some rows didn't get a final status — please double check the table below before using these results.")
 
-        st.write("")
         st.dataframe(df, use_container_width=True)
 
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="Download results (CSV)",
+            label="📥 Download Cleaned CSV",
             data=csv,
             file_name="bounceverify_cleaned_emails.csv",
             mime="text/csv",
-            type="primary",
         )
 
-        st.caption("Remember to paste these results into your own tracking sheet — nothing is saved here.")
+        st.warning("📋 Reminder: please update your own tracking sheet with these results now — this app doesn't save anything.")
