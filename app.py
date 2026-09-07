@@ -14,13 +14,11 @@ st.write("Upload your CSV file to verify emails and get clean results.")
 APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
 ACTOR_ID = "bounceverify~bounceverify-email-verifier"
 
-# ---------------- Settings (tweakable in the sidebar) ----------------
-with st.sidebar:
-    st.header("Settings")
-    BATCH_SIZE = st.number_input("Emails per Apify run", min_value=20, max_value=500, value=100, step=10)
-    MAX_RETRIES = st.number_input("Retries per batch", min_value=1, max_value=5, value=3, step=1)
-    POLL_INTERVAL = st.number_input("Poll interval (sec)", min_value=2, max_value=30, value=5, step=1)
-    MAX_WAIT_PER_BATCH = st.number_input("Max wait per batch (sec)", min_value=60, max_value=3600, value=1200, step=60)
+# ---------------- Settings (fixed, tuned for reliability at 1k+ emails) ----------------
+BATCH_SIZE = 100           # emails per Apify run
+MAX_RETRIES = 3            # retries per batch before giving up
+POLL_INTERVAL = 5          # seconds between run-status checks
+MAX_WAIT_PER_BATCH = 1200  # max seconds to wait for one batch (20 min)
 
 # ---------------- Local DNS/MX check (cached per domain) ----------------
 @lru_cache(maxsize=8192)
