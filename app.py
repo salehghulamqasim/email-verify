@@ -14,13 +14,14 @@ st.write("Upload your CSV file to verify emails and get clean results.")
 APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
 ACTOR_ID = "bounceverify~bounceverify-email-verifier"
 
-# ---------------- Settings (fixed, tuned for reliability at 1k+ emails) ----------------
-BATCH_SIZE = 50            # emails per Apify run — smaller = faster feedback, less risk per batch
+# ---------------- Fixed settings (not shown to users) ----------------
+BATCH_SIZE = 50            # emails per Apify run
 MAX_RETRIES = 3            # retries per batch before giving up
 POLL_INTERVAL = 5          # seconds between run-status checks
 MAX_WAIT_PER_BATCH = 600   # max seconds to wait for one batch (10 min)
 
-# ---------------- Local DNS/MX check (cached per domain) ----------------
+
+# ---------------- Local DNS/MX check (cached per domain — big speedup on large lists) ----------------
 @lru_cache(maxsize=8192)
 def _domain_has_mx(domain):
     try:
@@ -39,7 +40,7 @@ def check_local_dns(email):
     return False, "INVALID", "Domain or MX Record Missing"
 
 
-# ---------------- Apify: async run + poll (no more 120s read timeouts) ----------------
+# ---------------- Apify: async run + poll (this is the actual fix for 600+ emails) ----------------
 def _start_run(batch):
     url = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs?token={APIFY_TOKEN}"
     res = requests.post(url, json={"emails": batch}, timeout=30)
@@ -48,8 +49,8 @@ def _start_run(batch):
 
 
 def _wait_for_run(run_id, progress_text, label):
-    """Poll the run until done. Updates the UI on every tick so the browser
-    connection stays alive and the user can see it's still working."""
+    """Poll until the run finishes. Updates the UI every tick so the page
+    never sits silent (that silence is what makes it look 'stuck')."""
     url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={APIFY_TOKEN}"
     waited = 0
     while waited < MAX_WAIT_PER_BATCH:
@@ -103,7 +104,7 @@ def _classify(item):
 
 
 def _run_one_batch(batch, batch_num, total_batches, done_count, total, progress_text):
-    """Runs a single batch through Apify with retries. Returns dict {normalized_email: (status, reason)}."""
+    """Runs a single batch through Apify with retries. Returns {normalized_email: (status, reason)}."""
     results = {}
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -112,10 +113,7 @@ def _run_one_batch(batch, batch_num, total_batches, done_count, total, progress_
             )
             run_id = _start_run(batch)
 
-            label = (
-                f"Batch {batch_num}/{total_batches}: verifying {len(batch)} emails "
-                f"({done_count}/{total})"
-            )
+            label = f"Batch {batch_num}/{total_batches}: verifying {len(batch)} emails ({done_count}/{total})"
             progress_text.text(f"{label}...")
             run_data = _wait_for_run(run_id, progress_text, label)
 
@@ -169,11 +167,11 @@ def verify_with_apify(emails_to_verify):
 
         progress_bar.progress(done_count / total)
 
-    # Second pass: retry anything still missing, in smaller batches (higher success chance)
+    # Second pass: retry anything still missing, in smaller batches
     leftover = [e for e in unique_emails if e.strip().lower() not in all_results]
     if leftover:
-        progress_text.text(f"Retrying {len(leftover)} unresolved emails in smaller batches...")
-        small_batch = max(20, min(BATCH_SIZE, 50))
+        progress_text.text(f"Retrying {len(leftover)} unresolved emails...")
+        small_batch = 20
         for i in range(0, len(leftover), small_batch):
             batch = leftover[i : i + small_batch]
             batch_results = _run_one_batch(batch, 1, 1, i + len(batch), len(leftover), progress_text)
@@ -184,7 +182,7 @@ def verify_with_apify(emails_to_verify):
     return all_results
 
 
-# ---------------- Main app flow (session_state so results survive the download click) ----------------
+# ---------------- Main app flow ----------------
 if "results_df" not in st.session_state:
     st.session_state.results_df = None
 if "uploaded_name" not in st.session_state:
@@ -193,7 +191,6 @@ if "uploaded_name" not in st.session_state:
 uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 
 if uploaded_file is not None:
-    # Reset previous results if a new file is uploaded
     if st.session_state.uploaded_name != uploaded_file.name:
         st.session_state.results_df = None
         st.session_state.uploaded_name = uploaded_file.name
@@ -202,7 +199,7 @@ if uploaded_file is not None:
         df_preview = pd.read_csv(uploaded_file)
         email_col = next((col for col in df_preview.columns if "email" in col.lower()), None)
         if not email_col:
-            st.error("Could not find a column named 'email'. Please check your CSV.")
+            st.error("Could not find a column with 'email' in its name. Please check your CSV.")
             st.stop()
 
         st.write(f"Found **{len(df_preview)}** rows. Email column: **{email_col}**")
@@ -229,7 +226,6 @@ if uploaded_file is not None:
                         df.at[idx, "Verification_Status"] = status
                         df.at[idx, "Reason"] = reason
                     else:
-                        # Still pending after every retry = the service never returned a result
                         df.at[idx, "Verification_Status"] = "ERROR"
                         df.at[idx, "Reason"] = "No response from verification service after retries"
 
