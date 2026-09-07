@@ -10,34 +10,38 @@ st.title("📧 Bulk Email Verifier")
 st.write("Upload your CSV file to verify emails and get clean results.")
 
 # ------------------------------------------------------------------
-# Instructions banner
+# Instructions — collapsed by default so it doesn't dominate the page
 # ------------------------------------------------------------------
-st.info(
-    "**How to use this tool:**\n"
-    "1. Upload your **.csv** file (no Excel, PDF, or other formats — they won't work).\n"
-    "2. Click **Verify Emails**.\n"
-    "3. Download the result and **paste it into your own tracking sheet.** "
-    "This tool doesn't save anything — once you close the tab, it's gone.\n\n"
-    "✅ **Your data is safe:** this tool only *adds* new columns (`Verification_Status`, `Reason`) "
-    "to your file. It never edits, deletes, or reorders anything you already had."
-)
+with st.expander("ℹ️ How to use this tool"):
+    st.markdown(
+        "1. Upload your **.csv** file (no Excel, PDF, or other formats — they won't work).\n"
+        "2. Click **Verify Emails**.\n"
+        "3. Download the result and **paste it into your own tracking sheet.** "
+        "This tool doesn't save anything — once you close the tab, it's gone."
+    )
+st.caption("This tool only adds new columns (`Verification_Status`, `Reason`) — it never edits, deletes, or reorders your existing data.")
 
 APIFY_TOKEN = st.secrets.get("APIFY_TOKEN", "")
 
-# ------------------------------------------------------------------
-# Reset button — click this any time the uploader seems stuck.
-# ------------------------------------------------------------------
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
-reset_col, _ = st.columns([1, 3])
-with reset_col:
-    if st.button("🔄 Reset upload"):
-        st.session_state.uploader_key += 1
-        st.rerun()
-st.caption("Upload button stuck or not responding? Click **Reset upload** above, then try again.")
-
-st.divider()
+st.markdown(
+    """
+    <style>
+        .reset-link button {
+            background: transparent !important;
+            border: none !important;
+            color: #9a9ea6 !important;
+            font-size: 0.82rem !important;
+            padding: 0 !important;
+            box-shadow: none !important;
+        }
+        .reset-link button:hover { color: #c7cad0 !important; text-decoration: underline; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def check_local_dns(email_clean):
@@ -101,6 +105,14 @@ uploaded_file = st.file_uploader(
     type=["csv"],
     key=f"uploader_{st.session_state.uploader_key}",
 )
+
+st.markdown('<div class="reset-link">', unsafe_allow_html=True)
+if st.button("Upload stuck? Reset"):
+    st.session_state.uploader_key += 1
+    st.rerun()
+st.markdown('</div>', unsafe_allow_html=True)
+
+st.divider()
 
 if uploaded_file is not None:
     # Defensive check: type=["csv"] only filters the file picker dialog,
